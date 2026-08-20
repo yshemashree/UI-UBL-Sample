@@ -1,5 +1,5 @@
 [UBLversearchitecture.md](https://github.com/user-attachments/files/31263884/UBLversearchitecture.md)
-# UBLverse — Architecture & Overview
+# UBLverse: Architecture & Overview
 
 ## Repository
 
