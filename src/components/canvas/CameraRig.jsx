@@ -4,24 +4,55 @@ import * as THREE from 'three';
 import useWorldProgress from '../../hooks/useWorldProgress';
 import { useUBLverse } from '../../context/UBLverseContext';
 import { getHouseById } from '../../houses/housesConfig';
-import { easeInOutCubic, smoothstep } from '../../utils/mathUtils';
+import { easeInOutCubic, easeOutCubic, smoothstep } from '../../utils/mathUtils';
 
-// Canonical overview camera pose — the world's "establishing shot".
-// Elevated 3/4 view so the whole UBLverse map reads at a glance, like the
-// isometric reference, but framed cinematically rather than flat/top-down.
+// The world's opening establishing shot — also waypoint 0 of the tour below.
 const OVERVIEW = {
-  position: new THREE.Vector3(0, 14, 23),
-  lookAt: new THREE.Vector3(0, 0.6, -11),
-  fov: 45,
+  position: new THREE.Vector3(0, 16, 27),
+  lookAt: new THREE.Vector3(0, 1, -9),
+  fov: 44,
 };
 
-const UP = new THREE.Vector3(0, 1, 0);
+// Camera starts pulled back/high and glides down into OVERVIEW on first
+// load — a deliberate "arrival" beat instead of an instant static frame.
+const INTRO_START = {
+  position: new THREE.Vector3(0, 30, 44),
+  lookAt: new THREE.Vector3(0, 2, -8),
+  fov: 40,
+};
+const INTRO_DURATION = 2.6;
+
+// A fixed cinematic sweep across the whole map — scroll on the world
+// overview drives progress along this spline, the same lerp-toward-target
+// + spline-traversal mechanism used for House entry, just applied to a
+// "tour" instead of a single building.
+const TOUR_WAYPOINTS = [
+  { position: OVERVIEW.position.clone(), lookAt: OVERVIEW.lookAt.clone(), fov: 44 },
+  { position: new THREE.Vector3(-12, 10, 15), lookAt: new THREE.Vector3(-8, 1, -4), fov: 40 },
+  { position: new THREE.Vector3(0, 5.2, 3.5), lookAt: new THREE.Vector3(0, 1, -18), fov: 37 },
+  { position: new THREE.Vector3(12, 9.5, -8), lookAt: new THREE.Vector3(9, 1, -20), fov: 40 },
+  { position: new THREE.Vector3(2, 19, 19), lookAt: new THREE.Vector3(-1, 1.2, -15), fov: 45 },
+];
+
+function buildSplineFromWaypoints(waypoints) {
+  const posCurve = new THREE.CatmullRomCurve3(waypoints.map((w) => w.position), false, 'catmullrom', 0.5);
+  const lookCurve = new THREE.CatmullRomCurve3(waypoints.map((w) => w.lookAt), false, 'catmullrom', 0.5);
+  const fovs = waypoints.map((w) => w.fov ?? 44);
+  const fovAt = (t) => {
+    const segments = fovs.length - 1;
+    const scaled = Math.min(1, Math.max(0, t)) * segments;
+    const i = Math.min(segments - 1, Math.floor(scaled));
+    const localT = scaled - i;
+    return THREE.MathUtils.lerp(fovs[i], fovs[i + 1], localT);
+  };
+  return { posCurve, lookCurve, fovAt };
+}
 
 // Builds a 4-waypoint spline (world overview -> approach -> threshold -> interior)
 // purely from a House's `position` in housesConfig — this is what makes the
 // House entry engine reusable across every House without hand-authored camera
 // rigs per building.
-function buildWaypoints(house, startPos, startLook) {
+function buildHouseWaypoints(house, startPos, startLook) {
   const p = new THREE.Vector3(...house.position);
   const doorFacing = new THREE.Vector3(-p.x, 0, -p.z);
   if (doorFacing.lengthSq() < 0.0001) doorFacing.set(0, 0, 1);
@@ -36,35 +67,28 @@ function buildWaypoints(house, startPos, startLook) {
   const interiorPos = p.clone().addScaledVector(doorFacing, -1.8).add(new THREE.Vector3(0, 1.55, 0));
   const interiorLook = p.clone().addScaledVector(doorFacing, -7).add(new THREE.Vector3(0, 1.45, 0));
 
-  const posCurve = new THREE.CatmullRomCurve3(
-    [startPos.clone(), approachPos, thresholdPos, interiorPos],
-    false,
-    'catmullrom',
-    0.4
-  );
-  const lookCurve = new THREE.CatmullRomCurve3(
-    [startLook.clone(), approachLook, thresholdLook, interiorLook],
-    false,
-    'catmullrom',
-    0.4
-  );
-
-  return { posCurve, lookCurve, doorFacing, housePos: p };
+  return buildSplineFromWaypoints([
+    { position: startPos.clone(), lookAt: startLook.clone() },
+    { position: approachPos, lookAt: approachLook },
+    { position: thresholdPos, lookAt: thresholdLook },
+    { position: interiorPos, lookAt: interiorLook },
+  ]);
 }
 
 const CameraRig = () => {
   const { camera } = useThree();
   const { mode, selectedHouseId, registerControls, finishExit, progressRef, doorRef } = useUBLverse();
 
-  const idleTime = useRef(0);
-  const idleBase = useRef(OVERVIEW.position.clone());
-  const idleBaseLook = useRef(OVERVIEW.lookAt.clone());
-  const idleBlend = useRef(1); // 1 = fully settled on canonical overview pose
   const mouse = useRef({ x: 0, y: 0 });
+  const idleTime = useRef(0);
+  const introState = useRef({ active: true, t: 0 });
+  const blendFromCamera = useRef(null); // set on return-to-overview, blended out over ~1s
 
   const waypointsRef = useRef(null);
   const exitNowRef = useRef(() => {});
   const lastAutoTriggerRef = useRef(null);
+
+  const tourSpline = useMemo(() => buildSplineFromWaypoints(TOUR_WAYPOINTS), []);
 
   useEffect(() => {
     const handleMove = (e) => {
@@ -76,20 +100,30 @@ const CameraRig = () => {
   }, []);
 
   const onOverscrollExit = useCallback(() => exitNowRef.current(), []);
-  const { progress, animateTo } = useWorldProgress({ enabled: mode === 'house', onOverscrollExit });
+  const { progress: houseProgress, animateTo } = useWorldProgress({
+    enabled: mode === 'house',
+    onOverscrollExit,
+  });
+  const { progress: tourProgress } = useWorldProgress({
+    enabled: mode === 'overview',
+    resetOnDisable: false,
+    speed: 0.00085,
+    smoothing: 0.055,
+  });
 
-  // keep the shared context progress ref in sync so DOM/door consumers can read it
   useFrame(() => {
-    progressRef.current = mode === 'house' ? progress.current : 0;
-    doorRef.current = mode === 'house' ? smoothstep(0.52, 0.82, progress.current) : 0;
+    progressRef.current = mode === 'house' ? houseProgress.current : 0;
+    doorRef.current = mode === 'house' ? smoothstep(0.52, 0.82, houseProgress.current) : 0;
   });
 
   useEffect(() => {
     exitNowRef.current = () => {
       animateTo(0, 1.3, () => {
-        idleBase.current.copy(camera.position);
-        idleBaseLook.current.copy(OVERVIEW.lookAt);
-        idleBlend.current = 0;
+        blendFromCamera.current = {
+          position: camera.position.clone(),
+          fov: camera.fov,
+          t: 0,
+        };
         finishExit();
       });
     };
@@ -102,7 +136,7 @@ const CameraRig = () => {
     if (mode === 'house' && selectedHouseId) {
       const house = getHouseById(selectedHouseId);
       if (!house) return;
-      waypointsRef.current = buildWaypoints(house, camera.position, currentLookTarget(camera));
+      waypointsRef.current = buildHouseWaypoints(house, camera.position, currentLookTarget(camera));
 
       if (lastAutoTriggerRef.current !== selectedHouseId) {
         lastAutoTriggerRef.current = selectedHouseId;
@@ -116,7 +150,7 @@ const CameraRig = () => {
 
   useFrame((_, delta) => {
     if (mode === 'house' && waypointsRef.current) {
-      const t = easeInOutCubic(Math.min(1, Math.max(0, progress.current)));
+      const t = easeInOutCubic(Math.min(1, Math.max(0, houseProgress.current)));
       const { posCurve, lookCurve } = waypointsRef.current;
       const pos = posCurve.getPointAt(Math.min(1, t));
       const look = lookCurve.getPointAt(Math.min(1, t));
@@ -130,28 +164,59 @@ const CameraRig = () => {
       return;
     }
 
-    // Overview idle: gentle auto-drift + mouse parallax, blended in smoothly
-    // after returning from a House (mirrors the source engine's blend-in
-    // technique that prevents a snap when hooks re-enable).
+    // --- Overview mode ---
     idleTime.current += delta;
-    idleBlend.current = Math.min(1, idleBlend.current + delta * 0.6);
 
-    const sway = Math.sin(idleTime.current * 0.18) * 0.5;
-    const bob = Math.sin(idleTime.current * 0.27) * 0.18;
-    const parallaxX = mouse.current.x * 1.1;
-    const parallaxY = -mouse.current.y * 0.5;
+    // One-time arrival glide from a pulled-back establishing pose into the
+    // tour's starting frame.
+    if (introState.current.active) {
+      introState.current.t = Math.min(1, introState.current.t + delta / INTRO_DURATION);
+      const e = easeOutCubic(introState.current.t);
+      camera.position.lerpVectors(INTRO_START.position, TOUR_WAYPOINTS[0].position, e);
+      const look = new THREE.Vector3().lerpVectors(INTRO_START.lookAt, TOUR_WAYPOINTS[0].lookAt, e);
+      camera.lookAt(look);
+      const fov = THREE.MathUtils.lerp(INTRO_START.fov, TOUR_WAYPOINTS[0].fov, e);
+      if (Math.abs(camera.fov - fov) > 0.01) {
+        camera.fov = fov;
+        camera.updateProjectionMatrix();
+      }
+      if (introState.current.t >= 1) introState.current.active = false;
+      return;
+    }
 
-    const targetPos = OVERVIEW.position.clone().add(new THREE.Vector3(sway + parallaxX, bob + parallaxY * 0.4, 0));
-    const targetLook = OVERVIEW.lookAt.clone().add(new THREE.Vector3(parallaxX * 0.4, parallaxY * 0.2, 0));
+    const t = easeInOutCubic(Math.min(1, Math.max(0, tourProgress.current)));
+    const tourPos = tourSpline.posCurve.getPointAt(t);
+    const tourLook = tourSpline.lookCurve.getPointAt(t);
+    const tourFov = tourSpline.fovAt(t);
 
-    const blended = idleBase.current.clone().lerp(targetPos, idleBlend.current);
-    const blendedLook = idleBaseLook.current.clone().lerp(targetLook, idleBlend.current);
+    const parallaxX = mouse.current.x * 0.9;
+    const parallaxY = -mouse.current.y * 0.4;
+    const bob = Math.sin(idleTime.current * 0.3) * 0.12;
 
-    camera.position.lerp(blended, 0.06);
-    camera.lookAt(blendedLook);
+    const finalPos = tourPos.clone().add(new THREE.Vector3(parallaxX, bob + parallaxY * 0.4, 0));
+    const finalLook = tourLook.clone().add(new THREE.Vector3(parallaxX * 0.35, parallaxY * 0.2, 0));
 
-    if (Math.abs(camera.fov - OVERVIEW.fov) > 0.01) {
-      camera.fov = THREE.MathUtils.lerp(camera.fov, OVERVIEW.fov, 0.08);
+    // Blend out of wherever the House-exit animation left the camera, back
+    // onto the tour path, instead of snapping onto it.
+    if (blendFromCamera.current) {
+      const b = blendFromCamera.current;
+      b.t = Math.min(1, b.t + delta * 0.85);
+      const e = easeOutCubic(b.t);
+      camera.position.lerpVectors(b.position, finalPos, e);
+      camera.lookAt(finalLook);
+      const fov = THREE.MathUtils.lerp(b.fov, tourFov, e);
+      if (Math.abs(camera.fov - fov) > 0.01) {
+        camera.fov = fov;
+        camera.updateProjectionMatrix();
+      }
+      if (b.t >= 1) blendFromCamera.current = null;
+      return;
+    }
+
+    camera.position.lerp(finalPos, 0.09);
+    camera.lookAt(finalLook);
+    if (Math.abs(camera.fov - tourFov) > 0.01) {
+      camera.fov = THREE.MathUtils.lerp(camera.fov, tourFov, 0.08);
       camera.updateProjectionMatrix();
     }
   });
@@ -168,4 +233,4 @@ function currentLookTarget(camera) {
 }
 
 export default CameraRig;
-export { OVERVIEW, UP };
+export { OVERVIEW };

@@ -13,7 +13,7 @@ function Scene() {
 
   return (
     <Canvas
-      camera={{ position: [0, 14, 23], fov: 45, near: 0.1, far: 160 }}
+      camera={{ position: [0, 30, 44], fov: 40, near: 0.1, far: 180 }}
       gl={{
         antialias: settings.antialias,
         powerPreference: settings.powerPreference,

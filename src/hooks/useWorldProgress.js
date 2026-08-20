@@ -21,7 +21,13 @@ gsap.registerPlugin(Observer);
  * the world overview - guaranteeing the sequence is a single reversible
  * timeline rather than separate "enter" and "exit" animations.
  */
-const useWorldProgress = ({ enabled, onOverscrollExit, speed = 0.0016, smoothing = 0.07 }) => {
+const useWorldProgress = ({
+  enabled,
+  onOverscrollExit,
+  speed = 0.0016,
+  smoothing = 0.07,
+  resetOnDisable = true,
+}) => {
   const target = useRef(0);
   const current = useRef(0);
   const overscroll = useRef(0);
@@ -32,8 +38,10 @@ const useWorldProgress = ({ enabled, onOverscrollExit, speed = 0.0016, smoothing
     if (!enabled) {
       tweenRef.current?.kill();
       locked.current = false;
-      target.current = 0;
-      current.current = 0;
+      if (resetOnDisable) {
+        target.current = 0;
+        current.current = 0;
+      }
       overscroll.current = 0;
       return;
     }
@@ -45,7 +53,9 @@ const useWorldProgress = ({ enabled, onOverscrollExit, speed = 0.0016, smoothing
         target.current = current.current;
       }
 
-      const next = target.current - deltaY * speed;
+      // Positive deltaY = natural scroll-down/forward gesture -> increases
+      // progress (deeper into the House / further along the world tour).
+      const next = target.current + deltaY * speed;
       if (next <= 0) {
         overscroll.current += Math.max(0, -next);
         target.current = 0;
@@ -62,7 +72,7 @@ const useWorldProgress = ({ enabled, onOverscrollExit, speed = 0.0016, smoothing
     const observer = Observer.create({
       target: window,
       type: 'wheel,touch,pointer',
-      onWheel: (e) => applyDelta(e.deltaY),
+      onWheel: (e) => applyDelta(e.event.deltaY),
       onDrag: (e) => {
         if (e.event.touches && e.event.touches.length) {
           applyDelta(-e.deltaY * 10);
