@@ -94,6 +94,51 @@ button {
   opacity: 0.55;
 }
 
+/* ---------- Welcome / arrival title ---------- */
+.ublverse-welcome {
+  position: absolute;
+  top: 38%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  text-align: center;
+  opacity: 0;
+  transition: opacity 1.1s ease, transform 1.1s ease;
+}
+
+.ublverse-welcome--in {
+  opacity: 0;
+  transform: translate(-50%, -46%);
+}
+
+.ublverse-welcome--hold {
+  opacity: 1;
+  transform: translate(-50%, -50%);
+}
+
+.ublverse-welcome--out {
+  opacity: 0;
+  transform: translate(-50%, -54%);
+}
+
+.ublverse-welcome__eyebrow {
+  font-size: clamp(12px, 1.3vw, 15px);
+  letter-spacing: 0.3em;
+  text-transform: uppercase;
+  color: var(--ubl-cream);
+  opacity: 0.75;
+  margin-bottom: 6px;
+}
+
+.ublverse-welcome__title {
+  font-size: clamp(32px, 6vw, 64px);
+  font-weight: 700;
+  color: #fff;
+  text-shadow: 0 12px 40px rgba(0, 0, 0, 0.45);
+}
+
 /* ---------- Floating 3D house label (drei Html) ---------- */
 .house-label {
   display: flex;
